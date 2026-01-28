@@ -43,7 +43,7 @@ def data_collection_node(state: KCIState) -> dict:
     
     # Mock 데이터 생성 (실제로는 크롤링/API 호출)
     from src.agents.index_agent import create_mock_chicken_data
-    from src.tools.apis.ecos import MockEcosClient
+    from src.tools.apis.ecos import get_ecos_client
     
     start_date, end_date = state["date_range"]
     
@@ -51,14 +51,34 @@ def data_collection_node(state: KCIState) -> dict:
     chicken_prices = create_mock_chicken_data(start_date, end_date)
     
     # CPI (Mock)
-    ecos_client = MockEcosClient()
+    from src.config import get_settings
+    settings = get_settings()
+    ecos_client = get_ecos_client(use_mock=(not settings.ecos_api_key))
     cpi_data = ecos_client.get_cpi(
         start_date=start_date.replace("-", "")[:6],
         end_date=end_date.replace("-", "")[:6],
     )
     
-    # 도매가 (Mock) - 간단히 None
+    # (옵션) KAMIS 소매가격 피처
     wholesale_data = None
+    try:
+        from src.tools.apis.kamis import KAMISParams, KAMISClient
+        from src.config import get_settings
+        settings = get_settings()
+        if settings.kamis_cert_key and settings.kamis_cert_id and settings.kamis_itemcode and settings.kamis_itemcategorycode and settings.kamis_kindcode:
+            kamis = KAMISClient()
+            kamis_params = KAMISParams(
+                itemcategorycode=settings.kamis_itemcategorycode,
+                itemcode=settings.kamis_itemcode,
+                kindcode=settings.kamis_kindcode,
+                productrankcode=settings.kamis_productrankcode or '04',
+                countrycode=settings.kamis_countrycode or '',
+            )
+            wholesale_df = kamis.get_period_retail_prices(start_date, end_date, kamis_params)
+            wholesale_data = wholesale_df.to_dict(orient='records')
+            logger.info(f"KAMIS 소매가격 수집: {len(wholesale_df)}건")
+    except Exception as e:
+        logger.warning(f"KAMIS 수집 스킵/실패: {e}")
     
     logger.info(f"데이터 수집 완료: 치킨 {len(chicken_prices)}건, CPI {len(cpi_data)}건")
     

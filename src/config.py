@@ -73,6 +73,15 @@ class Settings(BaseSettings):
     deepseek_base_url: str = "https://api.deepseek.com/v1"
     ecos_api_key: str = ""
     data_go_kr_key: str = ""
+
+    # KAMIS OpenAPI (aT)
+    kamis_cert_key: str = ""
+    kamis_cert_id: str = ""
+    kamis_itemcategorycode: str = ""
+    kamis_itemcode: str = ""
+    kamis_kindcode: str = ""
+    kamis_productrankcode: str = "04"
+    kamis_countrycode: str = ""
     
     # Database
     database_path: str = "./data/kci.db"

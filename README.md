@@ -58,10 +58,24 @@ poetry install
 # 환경변수 설정
 cp .env.example .env
 
-# .env 파일 편집
+# .env 파일 편집 (필수/옵션)
+
+# (권장) CPI 수집용 - ECOS 키가 없으면 Mock로 대체됩니다
 ANTHROPIC_API_KEY=sk-ant-xxx
 DEEPSEEK_API_KEY=sk-xxx
-ECOS_API_KEY=your_key
+ECOS_API_KEY=your_ecos_key
+
+# (옵션) KAMIS 소매가격(기간 최대 1년) 피처 수집용
+# - cert_key/cert_id 발급 필요
+# - 품목코드/품종코드는 KAMIS 코드표에서 확인해서 넣어주세요
+KAMIS_CERT_KEY=your_kamis_cert_key
+KAMIS_CERT_ID=your_kamis_cert_id
+KAMIS_ITEMCATEGORYCODE=
+KAMIS_ITEMCODE=
+KAMIS_KINDCODE=
+KAMIS_PRODUCTRANKCODE=04
+KAMIS_COUNTRYCODE=
+
 ```
 
 ### 3. Run
