@@ -28,64 +28,120 @@ from src.agents.report_agent import ReportAgent
 
 def data_collection_node(state: KCIState) -> dict:
     """
-    데이터 수집 노드 (Data Agent)
-    
-    실제 구현에서는:
-    - 배달앱 크롤링
-    - ECOS API 호출
-    - aT API 호출
+    데이터 수집 노드:
+    - CPI: ECOS 실데이터(키 있으면) / 없으면 mock
+    - KCI 입력(치킨 가격): KAMIS 닭고기 소매가(키+코드 있으면) / 없으면 mock
     """
     logger.info("=== Data Collection Node ===")
-    
+
     from datetime import datetime
     import pandas as pd
-    import numpy as np
-    
-    # Mock 데이터 생성 (실제로는 크롤링/API 호출)
-    from src.agents.index_agent import create_mock_chicken_data
-    from src.tools.apis.ecos import get_ecos_client
-    
-    start_date, end_date = state["date_range"]
-    
-    # 치킨 가격 (Mock)
-    chicken_prices = create_mock_chicken_data(start_date, end_date)
-    
-    # CPI (Mock)
+
     from src.config import get_settings
+    from src.tools.apis.ecos import get_ecos_client
+    from src.agents.index_agent import create_mock_chicken_data
+
+    start_date, end_date = state["date_range"]
     settings = get_settings()
+
+    # ---------------------------
+    # 1) CPI: ECOS
+    # ---------------------------
     ecos_client = get_ecos_client(use_mock=(not settings.ecos_api_key))
     cpi_data = ecos_client.get_cpi(
         start_date=start_date.replace("-", "")[:6],
         end_date=end_date.replace("-", "")[:6],
+        item="total",
     )
-    
-    # (옵션) KAMIS 소매가격 피처
-    wholesale_data = None
+
+    # ---------------------------
+    # 2) KCI 입력: 기본은 Mock 치킨 가격
+    #    단, KAMIS 키/코드가 있으면 "KAMIS 닭고기 소매가"를 KCI 입력으로 사용
+    # ---------------------------
+    chicken_prices_df = None
+    kamis_used_as_kci = False
+
     try:
-        from src.tools.apis.kamis import KAMISParams, KAMISClient
-        from src.config import get_settings
-        settings = get_settings()
-        if settings.kamis_cert_key and settings.kamis_cert_id and settings.kamis_itemcode and settings.kamis_itemcategorycode and settings.kamis_kindcode:
+        from src.tools.apis.kamis import KAMISClient, KAMISParams
+
+        has_kamis_minimum = (
+            bool(settings.kamis_cert_key)
+            and bool(settings.kamis_cert_id)
+            and bool(settings.kamis_itemcategorycode)
+            and bool(settings.kamis_itemcode)
+            and bool(settings.kamis_kindcode)
+        )
+
+        if has_kamis_minimum:
             kamis = KAMISClient()
             kamis_params = KAMISParams(
                 itemcategorycode=settings.kamis_itemcategorycode,
                 itemcode=settings.kamis_itemcode,
                 kindcode=settings.kamis_kindcode,
-                productrankcode=settings.kamis_productrankcode or '04',
-                countrycode=settings.kamis_countrycode or '',
+                productrankcode=settings.kamis_productrankcode or "04",
+                countrycode=settings.kamis_countrycode or "",
             )
-            wholesale_df = kamis.get_period_retail_prices(start_date, end_date, kamis_params)
-            wholesale_data = wholesale_df.to_dict(orient='records')
-            logger.info(f"KAMIS 소매가격 수집: {len(wholesale_df)}건")
+
+            kamis_retail_df = kamis.get_period_retail_prices(
+                start_date=start_date,
+                end_date=end_date,
+                kamis_params=kamis_params,
+                convert_to_dataframe=True,
+            )
+
+            if kamis_retail_df is not None and not kamis_retail_df.empty:
+                target_brands = list(state.get("brands") or ["BBQ", "교촌", "BHC"])
+
+                # 일별일 수 있으니 주간으로 안정화 (일요일 기준)
+                s = (
+                    kamis_retail_df[["date", "price"]]
+                    .dropna()
+                    .assign(date=lambda x: pd.to_datetime(x["date"]))
+                    .set_index("date")["price"]
+                    .sort_index()
+                    .resample("W-SUN")
+                    .median()
+                    .dropna()
+                )
+
+                rows = []
+                for dt, px in s.items():
+                    for b in target_brands:
+                        rows.append(
+                            {
+                                "date": dt,
+                                "brand": b,
+                                "menu": "KAMIS_닭고기_소매가",
+                                "price": float(px),
+                                "source": "KAMIS",
+                            }
+                        )
+
+                chicken_prices_df = pd.DataFrame(rows)
+                kamis_used_as_kci = True
+
+                logger.info(
+                    f"KAMIS 닭고기 소매가를 KCI 입력으로 사용: "
+                    f"{len(s)}주 x {len(target_brands)}브랜드 = {len(chicken_prices_df)}건"
+                )
+
     except Exception as e:
-        logger.warning(f"KAMIS 수집 스킵/실패: {e}")
-    
-    logger.info(f"데이터 수집 완료: 치킨 {len(chicken_prices)}건, CPI {len(cpi_data)}건")
-    
+        logger.warning(f"KAMIS → KCI 입력 변환 스킵/실패: {e}")
+
+    if chicken_prices_df is None:
+        chicken_prices_df = create_mock_chicken_data(start_date, end_date)
+        logger.info(f"Mock 치킨 가격 사용: {len(chicken_prices_df)}건")
+
+    logger.info(
+        f"데이터 수집 완료: 치킨 {len(chicken_prices_df)}건, CPI {len(cpi_data)}건 "
+        f"(kamis_as_kci={kamis_used_as_kci})"
+    )
+
     return {
-        "raw_chicken_prices": chicken_prices.to_dict(orient="records"),
+        "raw_chicken_prices": chicken_prices_df.to_dict(orient="records"),
         "raw_cpi_data": cpi_data.to_dict(orient="records"),
-        "raw_wholesale_data": wholesale_data,
+        "raw_wholesale_data": None,
+        "kci_input_source": "KAMIS" if kamis_used_as_kci else "MOCK",
         "collection_timestamp": datetime.now().isoformat(),
     }
 
