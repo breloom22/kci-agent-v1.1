@@ -11,11 +11,13 @@ DataQuality Gate (V1.1)
 
 import pandas as pd
 import numpy as np
+import json
+from pathlib import Path
 from datetime import datetime
 from typing import Optional
 from loguru import logger
 
-from src.config import DATA_QUALITY_CONFIG, BRAND_CONFIGS
+from src.config import DATA_QUALITY_CONFIG, BRAND_CONFIGS, get_settings, COLLECTION_DAY
 from src.state import (
     DataQualityReport, 
     SourceConsistency, 
@@ -31,7 +33,37 @@ class DataQualityGate:
     
     def __init__(self, config=None):
         self.config = config or DATA_QUALITY_CONFIG
-        self._previous_menu_hashes = {}  # 메뉴 변경 감지용
+
+        # P0 Fix: 실행 간 표본(메뉴) 변경 감지를 위해 스냅샷을 디스크에 저장
+        settings = get_settings()
+        self._menu_snapshot_path = (
+            Path(settings.project_root) / "data" / "processed" / "menu_snapshot.json"
+        )
+        self._previous_menu_snapshot = self._load_menu_snapshot()
+
+    def _load_menu_snapshot(self) -> dict:
+        """이전 실행의 메뉴 스냅샷 로드 (brand -> sorted menus)"""
+        try:
+            if self._menu_snapshot_path.exists():
+                with open(self._menu_snapshot_path, "r", encoding="utf-8") as f:
+                    payload = json.load(f)
+                return payload.get("menus_by_brand", {})
+        except Exception as e:
+            logger.warning(f"menu_snapshot 로드 실패: {e}")
+        return {}
+
+    def _save_menu_snapshot(self, menus_by_brand: dict) -> None:
+        """메뉴 스냅샷 저장"""
+        try:
+            self._menu_snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "updated_at": datetime.now().isoformat(),
+                "menus_by_brand": menus_by_brand,
+            }
+            with open(self._menu_snapshot_path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.warning(f"menu_snapshot 저장 실패: {e}")
     
     def validate(
         self,
@@ -141,18 +173,42 @@ class DataQualityGate:
         return len(errors) == 0, errors
     
     def _calculate_missing_rate(self, df: pd.DataFrame) -> dict[str, float]:
-        """브랜드별 결측률 계산"""
-        if "brand" not in df.columns:
+        """브랜드별 결측률 계산 ("행 누락"까지 포함)
+
+        - 기존: price NaN 비율만 계산 → row 자체가 누락되면 결측률이 과소추정될 수 있음
+        - 개선: 기대 날짜 그리드 대비 (non-null 관측치 / 기대 관측치) 기반 결측률 계산
+        """
+        if "brand" not in df.columns or "date" not in df.columns:
             return {}
-        
-        result = {}
+
+        dfx = df.copy()
+        dfx["date"] = pd.to_datetime(dfx["date"]).dt.normalize()
+
+        unique_dates = pd.DatetimeIndex(sorted(dfx["date"].unique()))
+        if len(unique_dates) == 0:
+            return {b: 1.0 for b in BRAND_CONFIGS.keys()}
+
+        inferred = pd.infer_freq(unique_dates)
+        if inferred is None:
+            # COLLECTION_DAY: 0=월 ... 6=일
+            day_map = {0: "MON", 1: "TUE", 2: "WED", 3: "THU", 4: "FRI", 5: "SAT", 6: "SUN"}
+            inferred = f"W-{day_map.get(COLLECTION_DAY, 'SUN')}"
+
+        expected_dates = pd.date_range(unique_dates.min(), unique_dates.max(), freq=inferred)
+        expected_n = len(expected_dates) if len(expected_dates) > 0 else 1
+
+        result: dict[str, float] = {}
         for brand in BRAND_CONFIGS.keys():
-            brand_data = df[df["brand"] == brand]
-            if len(brand_data) == 0:
-                result[brand] = 1.0  # 데이터 없음 = 100% 결측
-            else:
-                result[brand] = brand_data["price"].isna().mean()
-        
+            brand_rows = dfx[dfx["brand"] == brand]
+            if len(brand_rows) == 0:
+                result[brand] = 1.0
+                continue
+
+            # 동일 날짜에 여러 행이 있으면 평균으로 집계
+            brand_series = brand_rows.groupby("date")["price"].mean().reindex(expected_dates)
+            non_null = int(brand_series.notna().sum())
+            result[brand] = 1.0 - (non_null / expected_n)
+
         return result
     
     def _detect_outliers(self, df: pd.DataFrame) -> list[dict]:
@@ -221,33 +277,35 @@ class DataQualityGate:
         return outliers
     
     def _detect_sample_changes(self, df: pd.DataFrame) -> tuple[bool, list[dict]]:
-        """표본 변경 감지 (메뉴/가게 변경)"""
-        changes = []
-        
+        """표본 변경 감지 (메뉴/가게 변경) - 실행 간 비교 가능하도록 영속화"""
+        changes: list[dict] = []
+
         if "brand" not in df.columns or "menu" not in df.columns:
             return False, changes
-        
+
+        prev_snapshot = {k: set(v) for k, v in (self._previous_menu_snapshot or {}).items()}
+        current_snapshot: dict[str, list[str]] = {}
+
         for brand in df["brand"].unique():
             brand_data = df[df["brand"] == brand]
-            current_menus = set(brand_data["menu"].unique())
-            
-            # 이전 기록과 비교
-            prev_menus = self._previous_menu_hashes.get(brand, set())
-            
+            current_menus = set(brand_data["menu"].dropna().astype(str).unique())
+            current_snapshot[brand] = sorted(current_menus)
+
+            prev_menus = prev_snapshot.get(brand, set())
             if prev_menus and current_menus != prev_menus:
-                added = current_menus - prev_menus
-                removed = prev_menus - current_menus
-                
+                added = sorted(list(current_menus - prev_menus))
+                removed = sorted(list(prev_menus - current_menus))
                 if added or removed:
                     changes.append({
                         "brand": brand,
-                        "added_menus": list(added),
-                        "removed_menus": list(removed),
+                        "added_menus": added,
+                        "removed_menus": removed,
                     })
-            
-            # 현재 상태 저장
-            self._previous_menu_hashes[brand] = current_menus
-        
+
+        # 스냅샷 저장 및 상태 갱신
+        self._save_menu_snapshot(current_snapshot)
+        self._previous_menu_snapshot = current_snapshot
+
         return len(changes) > 0, changes
     
     def _check_source_consistency(

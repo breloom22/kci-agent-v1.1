@@ -87,7 +87,8 @@ class IndexAgent:
                     total_weight += weight
             
             if total_weight > 0:
-                kci_values.append(weighted_sum / total_weight * total_weight)  # 정규화
+                # P0 Fix: 가중평균으로 정규화(결측이 생겨도 total_weight로 재정규화)
+                kci_values.append(weighted_sum / total_weight)
             else:
                 kci_values.append(np.nan)
         
