@@ -1,4 +1,4 @@
-# 🐔 Idiotology KCI Agent
+# 🐔 KCI Agent
 
 **Korean Chicken Index (KCI) AI Agent System - Research Grade v1.1**
 
@@ -108,7 +108,7 @@ python -m src.main --start 2020-01-01 --end 2024-12-31
 ## 📁 Project Structure
 
 ```
-idiotology-kci-agent/
+kci-agent/
 ├── src/
 │   ├── agents/
 │   │   ├── index_agent.py      # KCI 계산
