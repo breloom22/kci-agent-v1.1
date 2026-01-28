@@ -44,7 +44,7 @@ KCI Agent는 LangGraph 기반 멀티에이전트 시스템으로:
 
 ```bash
 # Clone
-git clone https://github.com/idiotology/kci-agent.git
+git clone https://github.com/breloom22/kci-agent.git
 cd kci-agent
 
 # Install dependencies
@@ -227,7 +227,3 @@ PR 환영합니다!
 ## 📜 License
 
 MIT License
-
----
-
-**Built with 🐔 by Idiotology Team**
